@@ -15,6 +15,7 @@ import java.io.IOException;
 import java.io.StringReader;
 import java.util.regex.PatternSyntaxException;
 
+import junit.framework.TestCase;
 import static org.junit.Assert.*;
 
 /**
@@ -22,11 +23,11 @@ import static org.junit.Assert.*;
  * 
  * @author chayes
  */
-public class ContentFilterTest {
+public class ContentFilterTest extends TestCase{
     private ContentFilter filter;
 
     public static void main(String[] args) {
-        junit.textui.TestRunner.run(ContentFilterTest.class);
+    	junit.textui.TestRunner.run(ContentFilterTest.class);
     }
 
     @Before
@@ -37,7 +38,7 @@ public class ContentFilterTest {
 
     @After
     protected void tearDown() throws Exception {
-        filter.clearMask();
+    	filter.clearMask();
         filter.clearPatterns();
         filter = null;
     }

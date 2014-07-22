@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plugin>
+	<class>cn.hollo.plugin.push.PushPlugin</class>
+	<name>iOSPush</name>
+    <description>IOS Push</description>
+    <author>Archie.Chen</author>
+    <version>1.0.0</version>
+    <date>18/07/2014</date>
+    <minServerVersion>1.0.0</minServerVersion>
+</plugin>
