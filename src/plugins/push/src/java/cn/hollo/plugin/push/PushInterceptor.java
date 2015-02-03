@@ -44,6 +44,7 @@ public class PushInterceptor implements PacketInterceptor {
 	private InterceptorManager interceptorManager;
 	private UserManager userManager;
 	private PresenceManager presenceManager;
+    private MultiUserChatService mucService;
     private HashMap<String,AtomicInteger> offlineCounter;
 
 	public PushInterceptor() {
@@ -54,6 +55,9 @@ public class PushInterceptor implements PacketInterceptor {
 		userManager = server.getUserManager();
 		presenceManager = server.getPresenceManager();
         offlineCounter = new HashMap<String, AtomicInteger>();
+        mucService = XMPPServer.getInstance()
+                .getMultiUserChatManager()
+                .getMultiUserChatService("conference");
 	}
 
 	/**
@@ -67,28 +71,22 @@ public class PushInterceptor implements PacketInterceptor {
             return;
         }
         if ((packet instanceof Message)) {
-            Log.info("Push interceptor for " + packet.toString() + " processed:" + processed + " incoming:" + incoming + " instance of " + packet
+            Log.info("Interceptor for " + packet.toString() + " processed:" + processed + " incoming:" + incoming + " instance of " + packet
                     .getClass());
             Message message = (Message) packet;
             if(message.getType()== Message.Type.normal){
                 if(message.getChildElement("x","jabber:x:conference")!=null){
                     JID groupJid = message.getFrom();
 
-                    MultiUserChatService service = XMPPServer.getInstance()
-                            .getMultiUserChatManager()
-                            .getMultiUserChatService("conference");
-
-                    MUCRoom groupChat = service.getChatRoom(groupJid.getNode());
+                    MUCRoom groupChat = mucService.getChatRoom(groupJid.getNode());
 
                     if (groupChat != null) {
                         MUCRole role = groupChat.getRole();
                         try {
-                            groupChat.addMember(message.getTo(), message.getTo().getNode(), role);
-                            Log.info("add member " + message.getTo() + " to room " + groupJid.getNode());
+                            groupChat.addOwner(message.getTo(), role);
+                            Log.info("Add owner " + message.getTo() + " to room " + groupJid.getNode());
                         } catch (ForbiddenException e) {
-                            Log.error("Add Member error. " + message.getTo().getNode(), e);
-                        } catch (ConflictException e) {
-                            Log.error("Add Member error. " + message.getTo().getNode(), e);
+                            Log.error("Add owner error. " + message.getTo().getNode(), e);
                         }
                     }
                 }
@@ -98,20 +96,13 @@ public class PushInterceptor implements PacketInterceptor {
         }
         if (packet instanceof Presence) {
             Presence p = (Presence)packet;
-
+            Log.info("Interceptor for " + packet.toString() + " processed:" + processed + " incoming:" + incoming + " instance of " + packet
+                    .getClass());
+            //加入群聊房间
             if (p.getExtension("x", "http://jabber.org/protocol/muc") != null) {
-                Log.info("Push interceptor for " + packet.toString() + " processed:" + processed + " incoming:" + incoming + " instance of " + packet
-                        .getClass());
-
                 JID groupJid = p.getTo();
 
-                MultiUserChatManager mucm = XMPPServer.getInstance()
-                        .getMultiUserChatManager();
-
-                MultiUserChatService service = mucm
-                        .getMultiUserChatService("conference");
-
-                MUCRoom groupChat = service.getChatRoom(groupJid.getNode());
+                MUCRoom groupChat = mucService.getChatRoom(groupJid.getNode());
 
                 if (groupChat != null) {
                     Presence np = new Presence();
@@ -142,9 +133,7 @@ public class PushInterceptor implements PacketInterceptor {
                     np.addExtension(extension);
                     XMPPServer.getInstance().getPacketRouter().route(np);
                     Log.info("response members:" + np.toString());
-
                 }
-
             }
 
             if ((p.getStatus() != null) && (p.getStatus().equals("logout"))) {
@@ -165,6 +154,36 @@ public class PushInterceptor implements PacketInterceptor {
                 finally {
                     DbConnectionManager.closeConnection(pstmt, con);
                 }
+            }
+
+            if ((p.getStatus() != null) && (p.getStatus().equals("exit"))) {
+                String userId = p.getFrom().getNode();
+                Log.info(userId + " exit.");
+                JID groupJid = p.getTo();
+
+                MUCRoom groupChat = mucService.getChatRoom(groupJid.getNode());
+
+                Collection<JID> owners = groupChat.getOwners();
+                if(owners.size()<=1){
+                    groupChat.destroyRoom(p.getFrom(),"Last owner leave.");
+                    Log.info("Room destroy.");
+                }else{
+                    MUCRole member = groupChat.getOccupantByFullJID(p.getFrom());
+                    if(member!=null) {
+                        Log.info("User Address of Room is " + member.getUserAddress());
+                        try {
+                            groupChat.addNone(p.getFrom(), member);
+                            Log.info("Removed member " + userId);
+                        } catch (ForbiddenException e) {
+                            Log.error("Exit room error.",e);
+                        } catch (ConflictException e) {
+                            Log.error("Exit room error.",e);
+                        }
+                    }else {
+                        Log.info("Occupant not found for " + p.getFrom().toString());
+                    }
+                }
+
             }
         }
     }
@@ -205,11 +224,7 @@ public class PushInterceptor implements PacketInterceptor {
 			JID recipient = message.getTo();
 			Log.info("recipient node is " + recipient.getNode());
 			Log.info("recipient domain is " + recipient.getDomain());
-			MultiUserChatManager mucm = XMPPServer.getInstance()
-					.getMultiUserChatManager();
-			MultiUserChatService service = mucm
-					.getMultiUserChatService("conference");
-			MUCRoom groupChat = service.getChatRoom(recipient.getNode());
+			MUCRoom groupChat = mucService.getChatRoom(recipient.getNode());
 			Collection<JID> members = groupChat.getMembers();
 			Log.info("Member Size:" + members.size());
 			for (JID member : members) {
@@ -345,4 +360,35 @@ public class PushInterceptor implements PacketInterceptor {
 		}
 	}
 
+    public static void main(String[] args){
+        String sound = "default";// 铃音
+        String certificatePath = "/Users/Archie/Downloads/new_dev_push.p12";
+        String certificatePassword = "pinche"; // 此处注意导出的证书密码不能为空因为空密码会报错
+        boolean isProduct = true;
+        String msg="This is testing.";
+        int badge = 1;
+        String token = "814631ce48c37b5cd55a6092ee3bf9b027f80d675856cdf0e9011d32c9cd49dd";
+        try {
+            PushNotificationPayload payLoad = new PushNotificationPayload();
+            payLoad.addAlert(msg); // 消息内容
+            payLoad.addBadge(badge); // iphone应用图标上小红圈上的数值
+            if (!StringUtils.isBlank(sound)) {
+                payLoad.addSound(sound);// 铃音
+            }
+            PushNotificationManager pushManager = new PushNotificationManager();
+            // true：表示的是产品发布推送服务 false：表示的是产品测试推送服务
+            pushManager
+                    .initializeConnection(new AppleNotificationServerBasicImpl(
+                            certificatePath, certificatePassword, isProduct));
+            // 发送push消息
+            Device device = new BasicDevice();
+            device.setToken(token);
+            PushedNotification notification = pushManager.sendNotification(
+                    device, payLoad, true);
+            System.out.println("notification is " + notification.isSuccessful());
+            pushManager.stopConnection();
+        } catch (Exception e) {
+            Log.error("Push Error.", e);
+        }
+    }
 }
