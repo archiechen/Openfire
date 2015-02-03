@@ -5,6 +5,9 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Collection;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import javapns.devices.Device;
 import javapns.devices.implementations.basic.BasicDevice;
@@ -20,23 +23,18 @@ import org.jivesoftware.openfire.XMPPServer;
 import org.jivesoftware.openfire.interceptor.InterceptorManager;
 import org.jivesoftware.openfire.interceptor.PacketInterceptor;
 import org.jivesoftware.openfire.interceptor.PacketRejectedException;
-import org.jivesoftware.openfire.muc.MUCRoom;
-import org.jivesoftware.openfire.muc.MultiUserChatManager;
-import org.jivesoftware.openfire.muc.MultiUserChatService;
+import org.jivesoftware.openfire.muc.*;
 import org.jivesoftware.openfire.session.Session;
 import org.jivesoftware.openfire.user.UserManager;
 import org.jivesoftware.openfire.user.UserNotFoundException;
 import org.jivesoftware.util.JiveGlobals;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.xmpp.packet.JID;
-import org.xmpp.packet.Message;
-import org.xmpp.packet.Packet;
-import org.xmpp.packet.Presence;
+import org.xmpp.packet.*;
 
 /**
  * <b>function:</b> send offline msg plugin
- * 
+ *
  * @author MZH
  */
 public class PushInterceptor implements PacketInterceptor {
@@ -46,6 +44,7 @@ public class PushInterceptor implements PacketInterceptor {
 	private InterceptorManager interceptorManager;
 	private UserManager userManager;
 	private PresenceManager presenceManager;
+    private HashMap<String,AtomicInteger> offlineCounter;
 
 	public PushInterceptor() {
 		interceptorManager = InterceptorManager.getInstance();
@@ -54,21 +53,121 @@ public class PushInterceptor implements PacketInterceptor {
 		XMPPServer server = XMPPServer.getInstance();
 		userManager = server.getUserManager();
 		presenceManager = server.getPresenceManager();
+        offlineCounter = new HashMap<String, AtomicInteger>();
 	}
 
 	/**
 	 * intercept message
 	 */
 	@Override
-	public void interceptPacket(Packet packet, Session session,
-			boolean incoming, boolean processed) throws PacketRejectedException {
-		if (processed || !(packet instanceof Message) || !incoming)
-			return;
-		Log.info("Push interceptor for " + packet.toString() + " processed:"
-				+ processed + " incoming:" + incoming);
-		this.doAction(packet, incoming, processed, session);
+    public void interceptPacket(Packet packet, Session session, boolean incoming, boolean processed)
+            throws PacketRejectedException
+    {
+        if ((processed) || (!incoming)) {
+            return;
+        }
+        if ((packet instanceof Message)) {
+            Log.info("Push interceptor for " + packet.toString() + " processed:" + processed + " incoming:" + incoming + " instance of " + packet
+                    .getClass());
+            Message message = (Message) packet;
+            if(message.getType()== Message.Type.normal){
+                if(message.getChildElement("x","jabber:x:conference")!=null){
+                    JID groupJid = message.getFrom();
 
-	}
+                    MultiUserChatService service = XMPPServer.getInstance()
+                            .getMultiUserChatManager()
+                            .getMultiUserChatService("conference");
+
+                    MUCRoom groupChat = service.getChatRoom(groupJid.getNode());
+
+                    if (groupChat != null) {
+                        MUCRole role = groupChat.getRole();
+                        try {
+                            groupChat.addMember(message.getTo(), message.getTo().getNode(), role);
+                            Log.info("add member " + message.getTo() + " to room " + groupJid.getNode());
+                        } catch (ForbiddenException e) {
+                            Log.error("Add Member error. " + message.getTo().getNode(), e);
+                        } catch (ConflictException e) {
+                            Log.error("Add Member error. " + message.getTo().getNode(), e);
+                        }
+                    }
+                }
+            }else {
+                doAction(packet, incoming, processed, session);
+            }
+        }
+        if (packet instanceof Presence) {
+            Presence p = (Presence)packet;
+
+            if (p.getExtension("x", "http://jabber.org/protocol/muc") != null) {
+                Log.info("Push interceptor for " + packet.toString() + " processed:" + processed + " incoming:" + incoming + " instance of " + packet
+                        .getClass());
+
+                JID groupJid = p.getTo();
+
+                MultiUserChatManager mucm = XMPPServer.getInstance()
+                        .getMultiUserChatManager();
+
+                MultiUserChatService service = mucm
+                        .getMultiUserChatService("conference");
+
+                MUCRoom groupChat = service.getChatRoom(groupJid.getNode());
+
+                if (groupChat != null) {
+                    Presence np = new Presence();
+                    np.setFrom(groupJid.asBareJID());
+                    np.setTo(p.getFrom());
+                    PacketExtension extension = new PacketExtension("members", "http://hollo.cn/muc/memberlist");
+
+                    Collection members = groupChat.getMembers();
+                    JID member;
+                    for (Iterator localIterator = members.iterator(); localIterator.hasNext();  ) { member = (JID)localIterator.next();
+                        if (member.getNode() != null)
+                        {
+                            if (member.getNode().equals(p.getFrom().getNode())) {
+                                Log.info("Already in members. " + p.getFrom());
+                            }
+                            extension.getElement().addElement("member").setText(member.getNode());
+                        }
+                    }
+
+                    Collection<JID> owners = groupChat.getOwners();
+                    for (JID owner : owners) {
+                        if (owner.getNode().equals(p.getFrom().getNode())) {
+                            Log.info("Already in owners. " + p.getFrom());
+                        }
+                        extension.getElement().addElement("member").setText(owner.getNode());
+                    }
+
+                    np.addExtension(extension);
+                    XMPPServer.getInstance().getPacketRouter().route(np);
+                    Log.info("response members:" + np.toString());
+
+                }
+
+            }
+
+            if ((p.getStatus() != null) && (p.getStatus().equals("logout"))) {
+                String userId = p.getFrom().getNode();
+                Log.info(userId + " logout.");
+                Connection con = null;
+                PreparedStatement pstmt = null;
+                try {
+                    con = DbConnectionManager.getConnection();
+                    pstmt = con.prepareStatement("UPDATE ofUser SET device_token=? WHERE username=?");
+                    pstmt.setNull(1, 12);
+                    pstmt.setString(2, userId);
+                    pstmt.executeUpdate();
+                }
+                catch (SQLException sqle) {
+                    Log.error("Logout error. " + userId, sqle);
+                }
+                finally {
+                    DbConnectionManager.closeConnection(pstmt, con);
+                }
+            }
+        }
+    }
 
 	/**
 	 * <b>send offline msg from this function </b>
@@ -81,22 +180,22 @@ public class PushInterceptor implements PacketInterceptor {
 			JID recipient = message.getTo();
 			// get message
 			try {
-				// if (recipient.getNode() == null
-				// ||
-				// !UserManager.getInstance().isRegisteredUser(recipient.getNode()))
-				// {
-				// // Sender is requesting presence information of an anonymous
-				// //throw new UserNotFoundException("Username is null");
-				// }
-
 				Presence status = presenceManager.getPresence(userManager
 						.getUser(recipient.getNode()));
+                Log.info(recipient.getNode()+ " status is " + (status == null ? "offline" : status.toString()));
 				if (status == null) { // offline
 					String deviceToken = getDeviceToken(recipient.getNode());
 					Log.info("Get Device Token is:" + deviceToken);
 					if (isApple(deviceToken))
-						pns(deviceToken, message.getBody());
-				}// end if
+                        if(offlineCounter.get(recipient.getNode())!=null){
+                            offlineCounter.get(recipient.getNode()).addAndGet(1);
+                        }else{
+                            offlineCounter.put(recipient.getNode(),new AtomicInteger(1));
+                        }
+						pns(deviceToken, message.getBody(),offlineCounter.get(recipient.getNode()).get());
+				}else{
+                    offlineCounter.remove(recipient.getNode());
+                }// end if
 
 			} catch (UserNotFoundException e) {
 				Log.warn("Push Error.", e);
@@ -124,14 +223,23 @@ public class PushInterceptor implements PacketInterceptor {
 					if (status == null) { // offline
 						String deviceToken = getDeviceToken(member.getNode());
 						Log.info("Get Device Token is:" + deviceToken);
-						if (isApple(deviceToken))
-							pns(deviceToken, message.getBody());
-					}// end if
+						if (isApple(deviceToken)) {
+                            if (offlineCounter.get(member.getNode()) != null) {
+                                offlineCounter.get(member.getNode()).addAndGet(1);
+                            } else {
+                                offlineCounter.put(member.getNode(), new AtomicInteger(1));
+                            }
+                            pns(deviceToken, message.getBody(), offlineCounter.get(member.getNode()).get());
+                        }
+					}else{
+                        offlineCounter.remove(member.getNode());
+                    }// end if
 				} catch (UserNotFoundException e) {
 					Log.warn("User not found.", e);
 				}
 			}
 			Collection<JID> owners = groupChat.getOwners();
+            Log.info("Owner Size:" + owners.size());
 			for (JID owner : owners) {
 				Presence status;
 				try {
@@ -140,11 +248,18 @@ public class PushInterceptor implements PacketInterceptor {
 					Log.info("owner is " + owner.toString() + " and status is "
 							+ (status == null ? "offline" : status.toString()));
 					if (status == null) { // offline
-						String deviceToken = getDeviceToken(owner.getNode());
-						Log.info("Get Device Token is:" + deviceToken);
-						if (isApple(deviceToken))
-							pns(deviceToken, message.getBody());
-					}// end if
+                        String deviceToken = getDeviceToken(owner.getNode());
+						if (isApple(deviceToken)) {
+                            if (offlineCounter.get(owner.getNode()) != null) {
+                                offlineCounter.get(owner.getNode()).addAndGet(1);
+                            } else {
+                                offlineCounter.put(owner.getNode(), new AtomicInteger(1));
+                            }
+                            pns(deviceToken, message.getBody(), offlineCounter.get(owner.getNode()).get());
+                        }
+					}else{
+                        offlineCounter.remove(owner.getNode());
+                    }// end if
 
 				} catch (UserNotFoundException e) {
 					Log.warn("User not found.", e);
@@ -155,7 +270,7 @@ public class PushInterceptor implements PacketInterceptor {
 
 	/**
 	 * 判断是否苹果
-	 * 
+	 *
 	 * @param deviceToken
 	 * @return
 	 */
@@ -197,7 +312,7 @@ public class PushInterceptor implements PacketInterceptor {
 				: null;
 	}
 
-	public void pns(String token, String msg) {
+	public void pns(String token, String msg, int badge) {
 		String sound = "default";// 铃音
 		String certificatePath = JiveGlobals.getProperty(
 				"plugin.push.apnsPath", "");
@@ -209,7 +324,7 @@ public class PushInterceptor implements PacketInterceptor {
 			Log.info("push for token:" + token + " and message:" + msg);
 			PushNotificationPayload payLoad = new PushNotificationPayload();
 			payLoad.addAlert(msg); // 消息内容
-			payLoad.addBadge(1); // iphone应用图标上小红圈上的数值
+			payLoad.addBadge(badge); // iphone应用图标上小红圈上的数值
 			if (!StringUtils.isBlank(sound)) {
 				payLoad.addSound(sound);// 铃音
 			}
