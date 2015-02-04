@@ -277,7 +277,7 @@ public class PushInterceptor implements PacketInterceptor {
                     }// end if
 
 				} catch (UserNotFoundException e) {
-					Log.warn("User not found.", e);
+					Log.warn("User not found "+owner.getNode(), e);
 				}
 			}
 		}
