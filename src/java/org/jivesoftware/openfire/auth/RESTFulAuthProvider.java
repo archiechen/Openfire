@@ -30,21 +30,21 @@ import org.json.JSONObject;
  * {@link HybridAuthProvider hybrid} auth provider, so that you can also have
  * XMPP-only users that won't pollute your external data.
  * <p>
- * 
+ *
  * To enable this provider, set the following in the system properties:
  * <ul>
  * <li>
  * <tt>provider.auth.className = org.jivesoftware.openfire.auth.RESTFulCAuthProvider</tt>
  * </li>
  * </ul>
- * 
+ *
  * You'll also need to set your RESTFul url:
- * 
+ *
  * <ul>
  * <li><tt>restfulProvider.url = http://localhost:5000/xmppauth</tt></li>
  * </ul>
- * 
- * 
+ *
+ *
  * The passwordType setting tells Openfire how the password is stored. Setting
  * the value is optional (when not set, it defaults to "plain"). The valid
  * values are:
@@ -55,7 +55,7 @@ import org.json.JSONObject;
  * <li>{@link PasswordType#sha256 sha256}
  * <li>{@link PasswordType#sha512 sha512}
  * </ul>
- * 
+ *
  * @author David Snopek
  */
 public class RESTFulAuthProvider implements AuthProvider {
@@ -63,7 +63,8 @@ public class RESTFulAuthProvider implements AuthProvider {
 	private static final Logger Log = LoggerFactory
 			.getLogger(RESTFulAuthProvider.class);
 
-	private static final String UPDATE_TOKEN = "UPDATE ofUser SET device_token=?,device_type=? WHERE username=?";;
+	private static final String UPDATE_TOKEN = "UPDATE ofUser SET device_token=?,device_type=? WHERE username=?";
+    private static final String REFRESH_TOKEN = "UPDATE ofUser SET device_token=?,device_type=? WHERE device_token=?";
 
 	private String connectionString;
 	private PasswordType passwordType;
@@ -178,7 +179,7 @@ public class RESTFulAuthProvider implements AuthProvider {
 	/**
 	 * Returns the value of the password field. It will be in plain text or
 	 * hashed format, depending on the password type.
-	 * 
+	 *
 	 * @param username
 	 *            user to retrieve the password field for
 	 * @return the password value.
@@ -220,7 +221,7 @@ public class RESTFulAuthProvider implements AuthProvider {
 			InputStream response = connection.getInputStream();
 			BufferedReader reader = new BufferedReader(new InputStreamReader(
 					response, charset));
-			 
+
 			String result = reader.readLine();
 			Log.info("HolloGo Server Response:"+result);
 			JSONObject jo = new JSONObject(result);
@@ -231,43 +232,6 @@ public class RESTFulAuthProvider implements AuthProvider {
 		} catch (Exception e) {
 			Log.error("Exception in RESTFulAuthProvider", e);
 			throw new UserNotFoundException();
-		}
-
-	}
-
-	private void setPasswordValue(String username, String password)
-			throws UserNotFoundException {
-		Log.info("setPasword value was called:usnermame:" + username
-				+ " password:" + password);
-		if (username.contains("@")) {
-			// Check that the specified domain matches the server's domain
-			int index = username.indexOf("@");
-			String domain = username.substring(index + 1);
-			if (domain.equals(XMPPServer.getInstance().getServerInfo()
-					.getXMPPDomain())) {
-				username = username.substring(0, index);
-			} else {
-				// Unknown domain.
-				throw new UserNotFoundException();
-			}
-		}
-		try {
-
-			if (passwordType == PasswordType.md5) {
-				password = StringUtils.hash(password, "MD5");
-			} else if (passwordType == PasswordType.sha1) {
-				password = StringUtils.hash(password, "SHA-1");
-			} else if (passwordType == PasswordType.sha256) {
-				password = StringUtils.hash(password, "SHA-256");
-			} else if (passwordType == PasswordType.sha512) {
-				password = StringUtils.hash(password, "SHA-512");
-			}
-
-		} catch (Exception e) {
-			Log.error("Exception in RESTFulAuthProvider", e);
-			throw new UserNotFoundException();
-		} finally {
-
 		}
 
 	}
@@ -307,7 +271,7 @@ public class RESTFulAuthProvider implements AuthProvider {
 
 	/**
 	 * Checks to see if the user exists; if not, a new user is created.
-	 * 
+	 *
 	 * @param username
 	 *            the username.
 	 */
@@ -334,28 +298,37 @@ public class RESTFulAuthProvider implements AuthProvider {
 			}
 		}
 	}
-	
+
 	private static void updateToken(String username,String deviceToken,String deviceType) throws UserNotFoundException{
 		Connection con = null;
 		PreparedStatement pstmt = null;
+        PreparedStatement rstmt = null;
         try {
             con = DbConnectionManager.getConnection();
             pstmt = con.prepareStatement(UPDATE_TOKEN);
             if (deviceToken == null || deviceToken.matches("\\s*")) {
-            	pstmt.setNull(1, Types.VARCHAR);
-            } 
+                pstmt.setNull(1, Types.VARCHAR);
+            }
             else {
-            	pstmt.setString(1, deviceToken);
+                pstmt.setString(1, deviceToken);
+                rstmt = con.prepareStatement(REFRESH_TOKEN);
+                rstmt.setNull(1, Types.VARCHAR);
+                rstmt.setNull(2, Types.VARCHAR);
+                rstmt.setString(3, deviceToken);
+                rstmt.executeUpdate();
             }
             pstmt.setString(2, deviceType);
             pstmt.setString(3, username);
             pstmt.executeUpdate();
+
         }
         catch (SQLException sqle) {
             throw new UserNotFoundException(sqle);
         }
         finally {
-            DbConnectionManager.closeConnection(pstmt, con);
+            DbConnectionManager.closeStatement(pstmt);
+            DbConnectionManager.closeStatement(rstmt);
+            DbConnectionManager.closeConnection(pstmt,con);
         }
 	}
 }

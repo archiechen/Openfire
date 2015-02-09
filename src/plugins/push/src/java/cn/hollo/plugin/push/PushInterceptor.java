@@ -17,6 +17,7 @@ import javapns.notification.PushNotificationPayload;
 import javapns.notification.PushedNotification;
 
 import org.apache.commons.lang.StringUtils;
+import org.dom4j.Element;
 import org.jivesoftware.database.DbConnectionManager;
 import org.jivesoftware.openfire.PresenceManager;
 import org.jivesoftware.openfire.XMPPServer;
@@ -24,13 +25,20 @@ import org.jivesoftware.openfire.interceptor.InterceptorManager;
 import org.jivesoftware.openfire.interceptor.PacketInterceptor;
 import org.jivesoftware.openfire.interceptor.PacketRejectedException;
 import org.jivesoftware.openfire.muc.*;
+import org.jivesoftware.openfire.privacy.PrivacyList;
+import org.jivesoftware.openfire.privacy.PrivacyListManager;
 import org.jivesoftware.openfire.session.Session;
 import org.jivesoftware.openfire.user.UserManager;
 import org.jivesoftware.openfire.user.UserNotFoundException;
 import org.jivesoftware.util.JiveGlobals;
+import org.json.JSONException;
+import org.json.JSONObject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xmpp.packet.*;
+import redis.clients.jedis.Jedis;
+import redis.clients.jedis.JedisPool;
+import redis.clients.jedis.JedisPoolConfig;
 
 /**
  * <b>function:</b> send offline msg plugin
@@ -41,26 +49,36 @@ public class PushInterceptor implements PacketInterceptor {
 	private static final Logger Log = LoggerFactory
 			.getLogger(PushInterceptor.class);
 	// Hook for intercpetorn
-	private InterceptorManager interceptorManager;
-	private UserManager userManager;
-	private PresenceManager presenceManager;
-    private MultiUserChatService mucService;
-    private HashMap<String,AtomicInteger> offlineCounter;
+	final private InterceptorManager interceptorManager;
+	final private UserManager userManager;
+    final private PresenceManager presenceManager;
+    final private MultiUserChatService mucService;
+    final private HashMap<String,AtomicInteger> offlineCounter;
+    final JedisPoolConfig poolConfig;
+    final JedisPool jedisPool;
+    final PrivacyListManager privacyListManager;
+    final private String pushChannel;
 
-	public PushInterceptor() {
+    public PushInterceptor() {
 		interceptorManager = InterceptorManager.getInstance();
 		interceptorManager.addInterceptor(this);
 
 		XMPPServer server = XMPPServer.getInstance();
 		userManager = server.getUserManager();
 		presenceManager = server.getPresenceManager();
+        privacyListManager = PrivacyListManager.getInstance();
         offlineCounter = new HashMap<String, AtomicInteger>();
         mucService = XMPPServer.getInstance()
                 .getMultiUserChatManager()
                 .getMultiUserChatService("conference");
-	}
+        String jedisHost = JiveGlobals.getProperty("redis.host", "localhost");
+        int jedisPort = JiveGlobals.getIntProperty("redis.port",6379);
+        poolConfig = new JedisPoolConfig();
+        jedisPool = new JedisPool(poolConfig, jedisHost, jedisPort, 100);
+        pushChannel =JiveGlobals.getProperty("redis.push","hollo_apns");
+    }
 
-	/**
+    /**
 	 * intercept message
 	 */
 	@Override
@@ -183,7 +201,10 @@ public class PushInterceptor implements PacketInterceptor {
                         Log.info("Occupant not found for " + p.getFrom().toString());
                     }
                 }
+            }
 
+            if (p.getType()== Presence.Type.unavailable) {
+                offlineCounter.remove(p.getFrom().getNode());
             }
         }
     }
@@ -192,13 +213,19 @@ public class PushInterceptor implements PacketInterceptor {
 	 * <b>send offline msg from this function </b>
 	 */
 	private void doAction(Packet packet, boolean incoming, boolean processed,
-			Session session) {
+			Session session) throws PacketRejectedException {
 		Message message = (Message) packet;
 		Log.info("is group? " + (message.getType() == Message.Type.groupchat));
 		if (message.getType() == Message.Type.chat) {
 			JID recipient = message.getTo();
 			// get message
 			try {
+                PrivacyList privacyList =  privacyListManager.getPrivacyList(message.getTo().getNode(), "banlist");
+                boolean shouldBlock = privacyList.shouldBlockPacket(message);
+                if(shouldBlock){
+                    Log.info("Should block packet. reason "+privacyList.asElement().asXML());
+                    throw new PacketRejectedException();
+                }
 				Presence status = presenceManager.getPresence(userManager
 						.getUser(recipient.getNode()));
                 Log.info(recipient.getNode()+ " status is " + (status == null ? "offline" : status.toString()));
@@ -211,15 +238,19 @@ public class PushInterceptor implements PacketInterceptor {
                         }else{
                             offlineCounter.put(recipient.getNode(),new AtomicInteger(1));
                         }
-						pns(deviceToken, message.getBody(),offlineCounter.get(recipient.getNode()).get());
+                    JSONObject jo = getJsonObject(message, recipient, deviceToken);
+                    jo.put("type","chat");
+                    pns(jo.toString());
 				}else{
                     offlineCounter.remove(recipient.getNode());
                 }// end if
 
 			} catch (UserNotFoundException e) {
 				Log.warn("Push Error.", e);
-			}
-		}
+			} catch (JSONException e) {
+                Log.warn("Create json error for member." + recipient.getNode(), e);
+            }
+        }
 		if (message.getType() == Message.Type.groupchat) {
 			JID recipient = message.getTo();
 			Log.info("recipient node is " + recipient.getNode());
@@ -228,7 +259,7 @@ public class PushInterceptor implements PacketInterceptor {
 			Collection<JID> members = groupChat.getMembers();
 			Log.info("Member Size:" + members.size());
 			for (JID member : members) {
-				Presence status;
+                Presence status;
 				try {
 					status = presenceManager.getPresence(userManager
 							.getUser(member.getNode()));
@@ -244,19 +275,25 @@ public class PushInterceptor implements PacketInterceptor {
                             } else {
                                 offlineCounter.put(member.getNode(), new AtomicInteger(1));
                             }
-                            pns(deviceToken, message.getBody(), offlineCounter.get(member.getNode()).get());
+                            JSONObject jo = getJsonObject(message, member, deviceToken);
+                            jo.put("room_id",recipient.getNode());
+                            jo.put("type","groupchat");
+                            Log.info("Message json is " + jo.toString());
+                            pns(jo.toString());
                         }
 					}else{
                         offlineCounter.remove(member.getNode());
                     }// end if
 				} catch (UserNotFoundException e) {
 					Log.warn("User not found.", e);
-				}
-			}
+				} catch (JSONException e) {
+                    Log.warn("Create json error for member." + member.getNode(), e);
+                }
+            }
 			Collection<JID> owners = groupChat.getOwners();
             Log.info("Owner Size:" + owners.size());
 			for (JID owner : owners) {
-				Presence status;
+               Presence status;
 				try {
 					status = presenceManager.getPresence(userManager
 							.getUser(owner.getNode()));
@@ -270,7 +307,11 @@ public class PushInterceptor implements PacketInterceptor {
                             } else {
                                 offlineCounter.put(owner.getNode(), new AtomicInteger(1));
                             }
-                            pns(deviceToken, message.getBody(), offlineCounter.get(owner.getNode()).get());
+                            JSONObject jo = getJsonObject(message, owner, deviceToken);
+                            jo.put("room_id",recipient.getNode());
+                            jo.put("type","groupchat");
+                            Log.info("Message json is " + jo.toString());
+                            pns(jo.toString());
                         }
 					}else{
                         offlineCounter.remove(owner.getNode());
@@ -278,12 +319,24 @@ public class PushInterceptor implements PacketInterceptor {
 
 				} catch (UserNotFoundException e) {
 					Log.warn("User not found "+owner.getNode(), e);
-				}
-			}
+				} catch (JSONException e) {
+                    Log.warn("Create json error for owner."+owner.getNode(), e);
+                }
+            }
 		}
 	}
 
-	/**
+    private JSONObject getJsonObject(Message message, JID recipient, String deviceToken) throws JSONException {
+        Element params =message.getChildElement("params","http://hollo.cn/xmpp/message/params");
+        JSONObject jo = new JSONObject();
+        jo.put("nickname", params.elementText("nickname"))
+            .put("messageType", params.elementText("messageType"))
+            .put("body", message.getBody())
+                .put("to", recipient.getNode()).put("token", deviceToken).put("badge",offlineCounter.get(recipient.getNode()).get());
+        return jo;
+    }
+
+    /**
 	 * 判断是否苹果
 	 *
 	 * @param deviceToken
@@ -327,37 +380,12 @@ public class PushInterceptor implements PacketInterceptor {
 				: null;
 	}
 
-	public void pns(String token, String msg, int badge) {
-		String sound = "default";// 铃音
-		String certificatePath = JiveGlobals.getProperty(
-				"plugin.push.apnsPath", "");
-		String certificatePassword = JiveGlobals.getProperty(
-				"plugin.push.apnsKey", ""); // 此处注意导出的证书密码不能为空因为空密码会报错
-		boolean isProduct = JiveGlobals.getBooleanProperty(
-				"plugin.push.isProduct", false);
-		try {
-			Log.info("push for token:" + token + " and message:" + msg);
-			PushNotificationPayload payLoad = new PushNotificationPayload();
-			payLoad.addAlert(msg); // 消息内容
-			payLoad.addBadge(badge); // iphone应用图标上小红圈上的数值
-			if (!StringUtils.isBlank(sound)) {
-				payLoad.addSound(sound);// 铃音
-			}
-			PushNotificationManager pushManager = new PushNotificationManager();
-			// true：表示的是产品发布推送服务 false：表示的是产品测试推送服务
-			pushManager
-					.initializeConnection(new AppleNotificationServerBasicImpl(
-							certificatePath, certificatePassword, isProduct));
-			// 发送push消息
-			Device device = new BasicDevice();
-			device.setToken(token);
-			PushedNotification notification = pushManager.sendNotification(
-					device, payLoad, true);
-			Log.info("notification is " + notification.isSuccessful());
-			pushManager.stopConnection();
-		} catch (Exception e) {
-			Log.error("Push Error.", e);
-		}
+	public void pns(String message) {
+        Jedis jedis = jedisPool.getResource();
+        Long published = jedis.publish(pushChannel, message);
+        Log.info("APNS published "+published);
+        jedisPool.returnResource(jedis);
+
 	}
 
     public static void main(String[] args){
