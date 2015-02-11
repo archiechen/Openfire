@@ -221,10 +221,12 @@ public class PushInterceptor implements PacketInterceptor {
 			// get message
 			try {
                 PrivacyList privacyList =  privacyListManager.getPrivacyList(message.getTo().getNode(), "banlist");
-                boolean shouldBlock = privacyList.shouldBlockPacket(message);
-                if(shouldBlock){
-                    Log.info("Should block packet. reason "+privacyList.asElement().asXML());
-                    throw new PacketRejectedException();
+                if(privacyList!=null) {
+                    boolean shouldBlock = privacyList.shouldBlockPacket(message);
+                    if (shouldBlock) {
+                        Log.info("Should block packet. reason " + privacyList.asElement().asXML());
+                        throw new PacketRejectedException();
+                    }
                 }
 				Presence status = presenceManager.getPresence(userManager
 						.getUser(recipient.getNode()));
