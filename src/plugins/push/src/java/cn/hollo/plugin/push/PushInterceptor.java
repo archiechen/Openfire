@@ -234,15 +234,16 @@ public class PushInterceptor implements PacketInterceptor {
 				if (status == null) { // offline
 					String deviceToken = getDeviceToken(recipient.getNode());
 					Log.info("Get Device Token is:" + deviceToken);
-					if (isApple(deviceToken))
+					if (isApple(deviceToken)){
                         if(offlineCounter.get(recipient.getNode())!=null){
                             offlineCounter.get(recipient.getNode()).addAndGet(1);
                         }else{
                             offlineCounter.put(recipient.getNode(),new AtomicInteger(1));
                         }
-                    JSONObject jo = getJsonObject(message, recipient, deviceToken);
-                    jo.put("type","chat");
-                    pns(jo.toString());
+                        JSONObject jo = getJsonObject(message, recipient, deviceToken);
+                        jo.put("type","chat");
+                        pns(jo.toString());
+                    }
 				}else{
                     offlineCounter.remove(recipient.getNode());
                 }// end if
